@@ -1,0 +1,799 @@
+# MedPrep AI — System Architecture
+
+Stack confirmed: Next.js 15 + TypeScript + Tailwind + shadcn/ui, Supabase (Postgres + Auth + Storage), Prisma, Gemini API only for AI (Phase 1), pgvector for RAG, Vercel deployment. Real production build.
+
+A note on the spec before diving in: a few items in the original brief work against each other and I've resolved them in a specific direction, flagged below so it's a decision rather than an accident.
+
+- **OpenAI + Claude API mentions removed from the active stack.** You confirmed Gemini-only. I've kept the AI layer behind a provider-agnostic interface so adding OpenAI/Claude later is a config change, not a rewrite — but Phase 1 code only calls Gemini.
+- **OCR deferred, but not blocked.** Gemini 2.5/3 models accept PDF pages as native multimodal input and read scanned/handwritten text reasonably well directly, so "OCR" isn't a separate pipeline stage in Phase 1 — it's folded into the Gemini analysis call. A dedicated OCR fallback (Tesseract or Google Vision) is a Phase 4+ item for pages Gemini scores low-confidence on.
+- **Voice in Viva Mode** needs browser speech-to-text (Web Speech API) or a transcription call — treated as Phase 5, not Phase 1, since it's additive to a working text-based viva.
+- **Subscriptions/payments** are modeled in the schema now (so migrations don't churn later) but Stripe integration itself is Phase 6, after the core product works.
+
+---
+
+## 1. High-Level Architecture
+
+```
+                                   ┌─────────────────────────┐
+                                   │        Browser           │
+                                   │  Next.js App (RSC + CSR) │
+                                   └────────────┬─────────────┘
+                                                │ HTTPS
+                                   ┌────────────▼─────────────┐
+                                   │   Vercel Edge / Node      │
+                                   │   Next.js API Routes      │
+                                   │   (Route Handlers)        │
+                                   └──┬───────────┬────────────┘
+                                      │           │
+                      ┌───────────────▼──┐   ┌────▼─────────────────┐
+                      │  Supabase Auth    │   │  Prisma ORM           │
+                      │  (JWT, OAuth)     │   │  → Postgres (Supabase)│
+                      └───────────────────┘   │  pgvector extension   │
+                                               └────┬──────────────────┘
+                                                    │
+                      ┌─────────────────────────────┼───────────────────┐
+                      │                              │                   │
+              ┌───────▼────────┐           ┌─────────▼────────┐  ┌──────▼──────┐
+              │ Supabase Storage│           │  Background Jobs  │  │  Gemini API  │
+              │ (raw PDFs)      │           │  (PDF processing  │  │  - analysis  │
+              │                 │           │   queue)          │  │  - embeddings│
+              └─────────────────┘           └────────┬──────────┘  │  - RAG chat  │
+                                                       │             └─────────────┘
+                                              ┌────────▼─────────┐
+                                              │  PDF Processing   │
+                                              │  Pipeline         │
+                                              │  (split→extract→  │
+                                              │   classify→embed) │
+                                              └────────────────────┘
+```
+
+Key architectural decisions:
+
+1. **Next.js does double duty** (frontend + API) to keep Phase 1 deployable as a single Vercel project. No separate backend service yet — if processing load grows beyond what serverless functions handle well (long PDF jobs), the processing pipeline is the one piece designed to be extractable into a standalone worker (e.g., a Supabase Edge Function or small Node worker on Railway/Fly) without touching the rest of the app.
+2. **Postgres is the single source of truth** for both relational data and vector search (pgvector), avoiding a separate vector DB (Pinecone/Weaviate) for Phase 1. This is the right tradeoff at moderate scale (tens of thousands of question chunks); revisit only if query latency becomes a problem.
+3. **All AI calls go through one internal abstraction** (`lib/ai/provider.ts`) so the rest of the app calls `analyzePdfPage()`, `generateEmbedding()`, `answerFromContext()` — never `fetch("generativelanguage.googleapis.com")` directly. This is what makes "Gemini only for now" a safe near-term choice.
+4. **Long-running work (PDF analysis) never blocks an HTTP request.** Upload returns immediately; processing happens via a job queue table (`processing_jobs`) polled by a worker route, with status streamed to the client.
+
+---
+
+## 2. Folder Structure
+
+```
+medprep-ai/
+├── prisma/
+│   ├── schema.prisma
+│   ├── migrations/
+│   └── seed.ts
+├── public/
+├── src/
+│   ├── app/
+│   │   ├── (auth)/
+│   │   │   ├── login/page.tsx
+│   │   │   ├── signup/page.tsx
+│   │   │   ├── forgot-password/page.tsx
+│   │   │   └── reset-password/page.tsx
+│   │   ├── (dashboard)/
+│   │   │   ├── layout.tsx                  # sidebar + topbar shell
+│   │   │   ├── dashboard/page.tsx
+│   │   │   ├── upload/page.tsx
+│   │   │   ├── library/page.tsx             # browse/filter all questions
+│   │   │   ├── library/[subjectId]/page.tsx
+│   │   │   ├── pyq-finder/page.tsx
+│   │   │   ├── predictor/page.tsx           # important question predictor
+│   │   │   ├── notes/page.tsx
+│   │   │   ├── notes/[noteId]/page.tsx
+│   │   │   ├── flashcards/page.tsx
+│   │   │   ├── flashcards/[deckId]/page.tsx
+│   │   │   ├── quiz/page.tsx
+│   │   │   ├── quiz/[quizId]/page.tsx
+│   │   │   ├── viva/page.tsx
+│   │   │   ├── revision-pdf/page.tsx
+│   │   │   ├── search/page.tsx
+│   │   │   └── settings/page.tsx
+│   │   ├── (admin)/
+│   │   │   ├── layout.tsx
+│   │   │   ├── admin/page.tsx
+│   │   │   ├── admin/users/page.tsx
+│   │   │   ├── admin/uploads/page.tsx
+│   │   │   ├── admin/subscriptions/page.tsx
+│   │   │   └── admin/feedback/page.tsx
+│   │   ├── api/
+│   │   │   ├── auth/callback/route.ts
+│   │   │   ├── pdfs/
+│   │   │   │   ├── upload/route.ts
+│   │   │   │   ├── [id]/route.ts
+│   │   │   │   └── [id]/status/route.ts
+│   │   │   ├── jobs/
+│   │   │   │   ├── process/route.ts          # worker trigger (cron / queue consumer)
+│   │   │   │   └── [id]/route.ts
+│   │   │   ├── questions/
+│   │   │   │   ├── route.ts                  # list + filter
+│   │   │   │   └── [id]/route.ts
+│   │   │   ├── pyq/search/route.ts
+│   │   │   ├── predictor/generate/route.ts
+│   │   │   ├── notes/generate/route.ts
+│   │   │   ├── summary/generate/route.ts
+│   │   │   ├── flashcards/generate/route.ts
+│   │   │   ├── quiz/
+│   │   │   │   ├── generate/route.ts
+│   │   │   │   ├── [id]/submit/route.ts
+│   │   │   ├── viva/
+│   │   │   │   ├── start/route.ts
+│   │   │   │   ├── answer/route.ts
+│   │   │   ├── revision-pdf/generate/route.ts
+│   │   │   ├── export/route.ts
+│   │   │   ├── search/route.ts                # global RAG-backed search
+│   │   │   └── admin/...
+│   │   ├── layout.tsx
+│   │   └── globals.css
+│   ├── components/
+│   │   ├── ui/                                 # shadcn primitives
+│   │   ├── upload/
+│   │   │   ├── dropzone.tsx
+│   │   │   ├── upload-progress.tsx
+│   │   ├── dashboard/
+│   │   │   ├── stat-card.tsx
+│   │   │   ├── recent-uploads.tsx
+│   │   ├── questions/
+│   │   │   ├── question-card.tsx
+│   │   │   ├── filter-bar.tsx
+│   │   │   ├── importance-badge.tsx
+│   │   ├── quiz/
+│   │   ├── viva/
+│   │   ├── flashcards/
+│   │   └── layout/
+│   │       ├── sidebar.tsx
+│   │       ├── topbar.tsx
+│   │       └── theme-toggle.tsx
+│   ├── lib/
+│   │   ├── ai/
+│   │   │   ├── provider.ts                     # AIProvider interface
+│   │   │   ├── gemini.ts                        # Gemini implementation
+│   │   │   ├── prompts/
+│   │   │   │   ├── classify-question.ts
+│   │   │   │   ├── generate-notes.ts
+│   │   │   │   ├── generate-summary.ts
+│   │   │   │   ├── generate-flashcards.ts
+│   │   │   │   ├── generate-quiz.ts
+│   │   │   │   ├── score-viva-answer.ts
+│   │   │   │   └── rag-answer.ts
+│   │   │   └── embeddings.ts
+│   │   ├── pdf/
+│   │   │   ├── split.ts                         # split into pages/chunks
+│   │   │   ├── extract.ts                       # text extraction (pdf-parse)
+│   │   │   └── pipeline.ts                       # orchestrates full processing
+│   │   ├── db/
+│   │   │   └── prisma.ts
+│   │   ├── supabase/
+│   │   │   ├── client.ts                         # browser client
+│   │   │   ├── server.ts                         # server client (RSC/route handlers)
+│   │   │   └── middleware.ts
+│   │   ├── auth/
+│   │   │   └── session.ts
+│   │   ├── validation/
+│   │   │   └── schemas.ts                        # zod schemas, one per endpoint
+│   │   ├── jobs/
+│   │   │   └── queue.ts
+│   │   └── utils.ts
+│   ├── hooks/
+│   │   ├── use-pdf-upload.ts
+│   │   ├── use-questions.ts
+│   │   └── use-job-status.ts
+│   ├── types/
+│   │   └── index.ts
+│   └── middleware.ts                              # route protection
+├── .env.example
+├── next.config.ts
+├── tailwind.config.ts
+├── package.json
+└── tsconfig.json
+```
+
+---
+
+## 3. Database Schema
+
+Designed for Prisma + Postgres, with `pgvector` for embeddings. Every table that's per-user carries `userId` for Row Level Security policies in Supabase even though Prisma itself doesn't enforce RLS — RLS is applied as raw SQL policies in a migration, described in §3.1.
+
+```prisma
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [pgvector(map: "vector")]
+}
+
+enum SubscriptionPlan {
+  FREE
+  PRO
+  INSTITUTION
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELED
+  PAST_DUE
+  TRIALING
+}
+
+enum QuestionType {
+  MCQ
+  SQ
+  LQ
+  VSQ
+}
+
+enum DifficultyLevel {
+  EASY
+  MEDIUM
+  HARD
+}
+
+enum PdfStatus {
+  UPLOADED
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum JobType {
+  PDF_ANALYSIS
+  NOTES_GENERATION
+  SUMMARY_GENERATION
+  FLASHCARD_GENERATION
+  QUIZ_GENERATION
+  REVISION_PDF
+}
+
+enum JobStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+model User {
+  id              String   @id @default(uuid()) // mirrors Supabase auth.users.id
+  email           String   @unique
+  fullName        String?
+  avatarUrl       String?
+  role            String   @default("student") // student | admin
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  profile         Profile?
+  pdfs            Pdf[]
+  questions       Question[]      @relation("QuestionOwner")
+  flashcardDecks  FlashcardDeck[]
+  quizAttempts    QuizAttempt[]
+  studySessions   StudySession[]
+  subscription    Subscription?
+  notes           Note[]
+  vivaSessions    VivaSession[]
+  feedback        Feedback[]
+
+  @@index([email])
+}
+
+model Profile {
+  id            String   @id @default(uuid())
+  userId        String   @unique
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  collegeName   String?
+  yearOfStudy   Int?
+  examTarget    String?  // e.g. "NEET PG", "University Finals"
+  preferences   Json     @default("{}") // theme, default filters, etc.
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model Subject {
+  id          String     @id @default(uuid())
+  name        String     @unique // e.g. "Anatomy", "Pharmacology"
+  slug        String     @unique
+  description String?
+  chapters    Chapter[]
+  pdfs        Pdf[]
+  questions   Question[]
+  createdAt   DateTime   @default(now())
+
+  @@index([slug])
+}
+
+model Chapter {
+  id          String     @id @default(uuid())
+  subjectId   String
+  subject     Subject    @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  name        String
+  orderIndex  Int        @default(0)
+  questions   Question[]
+  createdAt   DateTime   @default(now())
+
+  @@unique([subjectId, name])
+  @@index([subjectId])
+}
+
+model Pdf {
+  id            String     @id @default(uuid())
+  userId        String
+  user          User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subjectId     String?
+  subject       Subject?   @relation(fields: [subjectId], references: [id])
+  fileName      String
+  storagePath   String     // path in Supabase Storage bucket
+  fileSizeBytes Int
+  pageCount     Int?
+  status        PdfStatus  @default(UPLOADED)
+  errorMessage  String?
+  uploadedAt    DateTime   @default(now())
+  processedAt   DateTime?
+
+  questions     Question[]
+  jobs          ProcessingJob[]
+
+  @@index([userId])
+  @@index([status])
+}
+
+model Question {
+  id                String          @id @default(uuid())
+  pdfId             String
+  pdf               Pdf             @relation(fields: [pdfId], references: [id], onDelete: Cascade)
+  userId            String
+  user              User            @relation("QuestionOwner", fields: [userId], references: [id], onDelete: Cascade)
+  subjectId         String?
+  subject           Subject?        @relation(fields: [subjectId], references: [id])
+  chapterId         String?
+  chapter           Chapter?        @relation(fields: [chapterId], references: [id])
+
+  questionText      String
+  questionType      QuestionType
+  options           Json?           // for MCQ: [{label, text, isCorrect}]
+  correctAnswer     String?
+  modelAnswer       String?         // long-form ideal answer, esp. for LQ/SQ
+  marks             Int?
+  year              Int?
+  topic             String?
+  difficulty        DifficultyLevel?
+  sourcePage        Int?            // page number within original PDF
+
+  // dedup / frequency tracking
+  duplicateGroupId  String?         // groups identical/near-identical questions across PDFs
+  occurrenceCount   Int             @default(1)
+
+  embedding         Unsupported("vector(768)")? // Gemini text-embedding-004 dim
+
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  flashcards        Flashcard[]
+  quizQuestions     QuizQuestion[]
+
+  @@index([userId])
+  @@index([subjectId])
+  @@index([chapterId])
+  @@index([questionType])
+  @@index([year])
+  @@index([duplicateGroupId])
+}
+
+model ProcessingJob {
+  id            String     @id @default(uuid())
+  pdfId         String?
+  pdf           Pdf?       @relation(fields: [pdfId], references: [id], onDelete: Cascade)
+  userId        String
+  type          JobType
+  status        JobStatus  @default(PENDING)
+  progress      Int        @default(0) // 0-100
+  resultRef     String?    // id of generated Note/Flashcard deck/etc, if applicable
+  errorMessage  String?
+  startedAt     DateTime?
+  completedAt   DateTime?
+  createdAt     DateTime   @default(now())
+
+  @@index([userId])
+  @@index([status])
+}
+
+model Note {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title       String
+  content     String   // markdown
+  subjectId   String?
+  sourceQuestionIds String[] // questions used to generate this note
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model FlashcardDeck {
+  id          String      @id @default(uuid())
+  userId      String
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title       String
+  subjectId   String?
+  cards       Flashcard[]
+  createdAt   DateTime    @default(now())
+
+  @@index([userId])
+}
+
+model Flashcard {
+  id          String         @id @default(uuid())
+  deckId      String
+  deck        FlashcardDeck  @relation(fields: [deckId], references: [id], onDelete: Cascade)
+  questionId  String?
+  question    Question?      @relation(fields: [questionId], references: [id])
+  front       String
+  back        String
+  lastReviewedAt DateTime?
+  nextReviewAt   DateTime?   // simple spaced repetition scheduling
+  easeFactor     Float       @default(2.5)
+  createdAt   DateTime       @default(now())
+
+  @@index([deckId])
+}
+
+model Quiz {
+  id          String         @id @default(uuid())
+  userId      String
+  title       String
+  subjectId   String?
+  questions   QuizQuestion[]
+  attempts    QuizAttempt[]
+  createdAt   DateTime       @default(now())
+
+  @@index([userId])
+}
+
+model QuizQuestion {
+  id          String    @id @default(uuid())
+  quizId      String
+  quiz        Quiz      @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  questionId  String
+  question    Question  @relation(fields: [questionId], references: [id])
+  orderIndex  Int       @default(0)
+
+  @@unique([quizId, questionId])
+}
+
+model QuizAttempt {
+  id            String   @id @default(uuid())
+  quizId        String
+  quiz          Quiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  score         Float?
+  totalQuestions Int
+  answers       Json     // [{questionId, selected, correct}]
+  startedAt     DateTime @default(now())
+  completedAt   DateTime?
+
+  @@index([userId])
+  @@index([quizId])
+}
+
+model VivaSession {
+  id          String        @id @default(uuid())
+  userId      String
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subjectId   String?
+  status      String        @default("active") // active | completed
+  turns       VivaTurn[]
+  startedAt   DateTime      @default(now())
+  completedAt DateTime?
+
+  @@index([userId])
+}
+
+model VivaTurn {
+  id            String      @id @default(uuid())
+  sessionId     String
+  session       VivaSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  questionText  String
+  studentAnswer String?
+  modelAnswer   String?
+  score         Float?      // 0-10
+  feedback      String?
+  orderIndex    Int
+  createdAt     DateTime    @default(now())
+
+  @@index([sessionId])
+}
+
+model StudySession {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  activityType String  // "quiz" | "flashcards" | "viva" | "reading"
+  durationSec Int
+  subjectId   String?
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+  @@index([createdAt])
+}
+
+model Subscription {
+  id              String              @id @default(uuid())
+  userId          String              @unique
+  user            User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan            SubscriptionPlan    @default(FREE)
+  status          SubscriptionStatus  @default(ACTIVE)
+  stripeCustomerId String?
+  stripeSubscriptionId String?
+  currentPeriodEnd DateTime?
+  payments        Payment[]
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+}
+
+model Payment {
+  id              String       @id @default(uuid())
+  subscriptionId  String
+  subscription    Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  amountCents     Int
+  currency        String       @default("usd")
+  status          String       // succeeded | failed | refunded
+  stripePaymentId String?
+  createdAt       DateTime     @default(now())
+
+  @@index([subscriptionId])
+}
+
+model Feedback {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category    String   // bug | feature_request | content_issue | other
+  message     String
+  status      String   @default("open") // open | reviewed | resolved
+  createdAt   DateTime @default(now())
+
+  @@index([status])
+}
+```
+
+### 3.1 Row Level Security (applied via raw SQL migration, not Prisma)
+
+Supabase enforces auth at the Postgres level. Every user-owned table gets a policy in the same shape:
+
+```sql
+alter table "Pdf" enable row level security;
+
+create policy "Users can view own pdfs"
+  on "Pdf" for select
+  using (auth.uid()::text = "userId");
+
+create policy "Users can insert own pdfs"
+  on "Pdf" for insert
+  with check (auth.uid()::text = "userId");
+
+create policy "Users can update own pdfs"
+  on "Pdf" for update
+  using (auth.uid()::text = "userId");
+
+create policy "Users can delete own pdfs"
+  on "Pdf" for delete
+  using (auth.uid()::text = "userId");
+```
+
+This pattern repeats for `Question`, `Note`, `FlashcardDeck`, `Quiz`, `QuizAttempt`, `VivaSession`, `StudySession`, `Subscription`, `Feedback`. `Subject` and `Chapter` are global reference data — readable by all authenticated users, writable only by service role (admin operations via a server-side Supabase client using the service key, never exposed to the browser).
+
+Admin override: a separate policy grants full access where `auth.jwt() ->> 'role' = 'admin'`, checked against a custom claim set during user creation — not the `User.role` column directly, since RLS policies can't easily join application tables efficiently at scale. The custom claim is synced to the column on every role change via a Postgres trigger.
+
+### 3.2 pgvector setup
+
+```sql
+create extension if not exists vector;
+
+create index on "Question" using hnsw (embedding vector_cosine_ops);
+```
+
+HNSW over IVFFlat because question volume per user is modest (hundreds to low thousands), and HNSW gives better recall without needing to retrain the index as data grows.
+
+---
+
+## 4. API Endpoints
+
+All routes are Next.js Route Handlers under `src/app/api/`. Every handler validates input with Zod, checks the Supabase session, and returns a consistent envelope: `{ data, error }`.
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| POST | `/api/pdfs/upload` | Accepts multipart upload, stores to Supabase Storage, creates `Pdf` row (status `UPLOADED`), enqueues `PDF_ANALYSIS` job |
+| GET | `/api/pdfs/[id]` | Fetch single PDF metadata + status |
+| GET | `/api/pdfs/[id]/status` | Poll processing status/progress (used by upload progress UI) |
+| DELETE | `/api/pdfs/[id]` | Delete PDF + cascade questions |
+| POST | `/api/jobs/process` | Worker entrypoint — picks next `PENDING` job, runs pipeline. Triggered by Vercel Cron every ~30s in Phase 1; replaced by a real queue (see §6) once volume justifies it |
+| GET | `/api/jobs/[id]` | Job status/progress |
+| GET | `/api/questions` | List + filter: `subjectId`, `chapterId`, `year`, `questionType`, `difficulty`, `topic`, `repeatedOnly`, pagination |
+| GET | `/api/questions/[id]` | Single question detail |
+| PATCH | `/api/questions/[id]` | Manual correction of AI-assigned metadata (subject/chapter/type/etc) |
+| GET | `/api/pyq/search?topic=` | Previous-year-question finder: returns years appeared, occurrence count, importance score |
+| POST | `/api/predictor/generate` | Body: `{ subjectId?, limit: 20\|50\|100 }` → ranked important questions by frequency + recency weighting |
+| POST | `/api/notes/generate` | Body: `{ questionIds[] }` → AI notes, saved as `Note` |
+| POST | `/api/summary/generate` | Body: `{ chapterId }` → chapter summary |
+| POST | `/api/flashcards/generate` | Body: `{ questionIds[] or chapterId }` → `FlashcardDeck` |
+| POST | `/api/quiz/generate` | Body: `{ subjectId?, chapterId?, questionType?, count }` → `Quiz` |
+| POST | `/api/quiz/[id]/submit` | Body: `{ answers }` → scores, creates `QuizAttempt` |
+| POST | `/api/viva/start` | Body: `{ subjectId? }` → creates `VivaSession`, returns first question |
+| POST | `/api/viva/answer` | Body: `{ sessionId, turnId, answer }` → AI score + feedback + next question |
+| POST | `/api/revision-pdf/generate` | Body: filter criteria → generates downloadable PDF, returns signed URL |
+| POST | `/api/export` | Body: `{ type: 'note'\|'quiz'\|'deck', id, format: 'pdf'\|'docx'\|'markdown' }` |
+| GET | `/api/search?q=` | Global RAG search across user's own uploaded content |
+| GET/POST/PATCH/DELETE | `/api/admin/users` | Admin-only user management |
+| GET | `/api/admin/uploads` | Admin view of all uploads/processing health |
+| GET/PATCH | `/api/admin/subscriptions` | Admin subscription management |
+| GET/PATCH | `/api/admin/feedback` | Admin feedback triage |
+
+Every admin route checks `role === 'admin'` server-side before touching data — never trust a client-side route guard alone.
+
+---
+
+## 5. Authentication Flow
+
+1. **Email signup/login** and **Google OAuth** both go through Supabase Auth (`@supabase/ssr`), not a custom auth system — this avoids reinventing password hashing, email verification, and session refresh.
+2. **Session storage**: Supabase issues a JWT stored in an httpOnly cookie via `@supabase/ssr`'s cookie adapter. Next.js middleware (`src/middleware.ts`) refreshes the session on every request and redirects unauthenticated users away from `(dashboard)` and `(admin)` route groups.
+3. **First login bootstrap**: a Postgres trigger on `auth.users` insert creates a matching `public.User` row (synced `id`, `email`) and an empty `Profile`, so the app's `User` table never drifts out of sync with Supabase's own auth table.
+4. **Forgot password**: Supabase's built-in `resetPasswordForEmail` flow — sends a reset link, lands on `/reset-password`, calls `updateUser({ password })`.
+5. **Google login**: configured as an OAuth provider in the Supabase dashboard; client calls `signInWithOAuth({ provider: 'google' })`, redirect handled by `/api/auth/callback/route.ts` which exchanges the code for a session.
+6. **Authorization within the app**: RLS is the real enforcement layer (§3.1). Route handlers additionally check `role` for admin endpoints as defense in depth, but the database is what actually prevents cross-user data leaks even if an API route has a bug.
+
+---
+
+## 6. PDF Processing Pipeline
+
+```
+Upload → Store in Supabase Storage → Create Pdf row (UPLOADED) → Enqueue ProcessingJob
+   ↓
+Worker picks job (status → PROCESSING)
+   ↓
+1. Split PDF into page images/chunks (pdf-lib for page count, pdftoppm-equivalent or
+   pdf-to-img for rendering pages Gemini will read natively as multimodal input)
+   ↓
+2. For each page (or small batch of pages), call Gemini with the page content + a
+   structured-output prompt asking it to:
+   - identify every discrete question on the page
+   - classify type (MCQ/SQ/LQ/VSQ), subject, likely chapter, topic, year (if visible
+     on a header/footer), marks (if stated), difficulty
+   - extract options + correct answer for MCQs if marked
+   ↓
+3. Parse Gemini's JSON response (schema-constrained via responseSchema) into draft
+   Question rows
+   ↓
+4. Deduplication pass: generate an embedding for each new question, compare via cosine
+   similarity against existing questions for that user+subject; if similarity > 0.92,
+   link via duplicateGroupId and increment occurrenceCount instead of creating a
+   duplicate row
+   ↓
+5. Persist Question rows + embeddings, update Pdf.status → COMPLETED,
+   ProcessingJob.status → SUCCEEDED
+   ↓
+6. Client polling /api/pdfs/[id]/status sees COMPLETED, UI updates
+```
+
+Failure handling: any page that fails classification (malformed response, API error) is retried up to 2 times with backoff; if still failing, that page is flagged in `Pdf.errorMessage` as a partial failure but doesn't block the rest of the PDF from completing — a 40-page paper shouldn't fail entirely because page 17 had a weird scan.
+
+**On the queue mechanism**: Phase 1 uses a simple `ProcessingJob` table polled by a Vercel Cron-triggered route every 30 seconds, processing one job at a time per invocation. This is intentionally minimal — it works correctly and is easy to debug. It does **not** scale to many concurrent uploads across many users. The upgrade path (Phase 4) is swapping the polling consumer for a real queue (Supabase's pg_cron + pg_boss, or moving to Inngest/Trigger.dev) without changing the job table's shape or any producer code — only the consumer changes.
+
+---
+
+## 7. AI Processing Flow (Detail)
+
+All AI calls route through `lib/ai/provider.ts`:
+
+```typescript
+interface AIProvider {
+  analyzePdfPage(input: { imageBase64: string; pageNumber: number }): Promise<PageAnalysisResult>;
+  generateEmbedding(text: string): Promise<number[]>;
+  generateNotes(questions: Question[]): Promise<string>;
+  generateSummary(questions: Question[], chapterName: string): Promise<string>;
+  generateFlashcards(questions: Question[]): Promise<Array<{ front: string; back: string }>>;
+  generateQuiz(questions: Question[]): Promise<QuizDraft>;
+  scoreVivaAnswer(question: string, studentAnswer: string, modelAnswer?: string): Promise<VivaScoreResult>;
+  answerFromContext(query: string, contextChunks: string[]): Promise<string>; // RAG
+}
+```
+
+`lib/ai/gemini.ts` implements this interface against the Gemini API:
+
+- **PDF page analysis**: `gemini-2.5-flash` (or current equivalent fast multimodal model) with a `responseSchema` enforcing strict JSON output — no markdown fences to parse, no regex extraction of structured data from prose.
+- **Embeddings**: Gemini's `text-embedding-004` (768-dim, matches the `vector(768)` column above).
+- **Notes/summaries/flashcards/quiz generation**: same fast model, text-only prompts built from already-extracted `Question` rows — these calls never re-touch the original PDF, which keeps them cheap and fast.
+- **Viva scoring**: a structured prompt asking the model to score 0-10 against a rubric (correctness, completeness, clinical reasoning where relevant) and return both a score and specific feedback — never just a bare number, since "you got a 6" without explanation isn't useful to a student.
+
+All prompts live in `lib/ai/prompts/` as standalone functions returning `{ systemPrompt, userPrompt, responseSchema }`, kept separate from the calling code so they can be iterated on/evaluated independently.
+
+---
+
+## 8. RAG Architecture
+
+Used for: **global search** (§ "Search" feature) and as the retrieval step behind **chapter summaries** and **notes generation** when grounding against a large set of source questions rather than a hand-picked few.
+
+```
+User query
+   ↓
+1. Embed query (Gemini text-embedding-004)
+   ↓
+2. pgvector similarity search scoped to user_id (and optional subject/chapter filter)
+   → SELECT ... ORDER BY embedding <=> $queryEmbedding LIMIT 8
+   ↓
+3. Retrieved Question rows (text + metadata) assembled into context block
+   ↓
+4. Gemini call: "Answer using ONLY the following retrieved questions/answers.
+   If the answer isn't in the provided context, say so explicitly — do not
+   use outside knowledge." + context + query
+   ↓
+5. Response returned with citations back to source Question ids (so UI can
+   link "this came from your 2021 Pharmacology paper, page 4")
+```
+
+The "don't use outside knowledge" instruction matters specifically here: the entire value proposition is that answers are grounded in *the student's own uploaded material*, not generic internet knowledge the model already has. A RAG system that quietly falls back to parametric knowledge when retrieval is thin defeats the purpose and should be treated as a bug, not graceful degradation.
+
+Chunking strategy: each `Question` row (question text + options + model answer, concatenated) is one embedding — not arbitrary fixed-size text chunks — because questions are already a natural, complete unit of meaning. This avoids the usual RAG problem of chunks splitting mid-thought.
+
+---
+
+## 9. Subscription Model
+
+| Plan | Price (indicative) | Limits |
+|---|---|---|
+| **Free** | $0 | 3 PDF uploads/month, 50 AI-generated items (notes/flashcards/quiz questions) per month, no Revision PDF export, no Viva Mode |
+| **Pro** | ~$8–12/mo | Unlimited uploads, unlimited AI generation, all export formats, Viva Mode, priority processing |
+| **Institution** | Custom | Pro features + multi-seat admin panel, bulk PDF upload for a whole class/college, usage analytics |
+
+Enforcement: a `checkQuota()` helper checked server-side before any AI-generation or upload route proceeds, reading current usage against `Subscription.plan` limits (usage counted via a rolling count on `ProcessingJob`/`Pdf` created in the current billing period — no separate usage table needed at this scale). Stripe webhooks (`/api/webhooks/stripe`, added in Phase 6) keep `Subscription.status` and `currentPeriodEnd` in sync.
+
+---
+
+## 10. Feature Roadmap (Full Scope)
+
+1. Auth, dashboard shell, PDF upload + storage
+2. PDF processing pipeline (Gemini analysis → structured questions), library/filter UI
+3. PYQ Finder, Important Question Predictor, global RAG search
+4. Notes generator, chapter summaries, flashcards, queue hardening
+5. Quiz Mode, Viva Mode (text first, then voice), spaced repetition for flashcards
+6. Revision PDF generator, export (PDF/DOCX/Markdown), Stripe subscriptions
+7. Admin panel (users, uploads, subscriptions, feedback), usage analytics
+8. Polish: error boundaries everywhere, loading-state audit, accessibility pass, rate limiting, monitoring/alerting (Sentry), load testing the processing pipeline
+
+---
+
+## 11. Development Phases (Granular)
+
+**Phase 1 — Foundation (this session implements this):**
+- Project scaffold: Next.js 15 + TS + Tailwind + shadcn/ui
+- Prisma schema + initial migration against a Supabase Postgres instance
+- Supabase Auth wired up: email signup/login, Google OAuth, forgot password
+- Route protection middleware
+- Dashboard shell (sidebar, topbar, theme toggle, dark/light mode)
+- Dashboard page with stat cards (wired to real but possibly-empty queries, not mocked numbers)
+- Upload page: drag-and-drop, multi-file, progress bar, stores to Supabase Storage, creates `Pdf` rows
+- `ProcessingJob` table + a minimal worker route (job creation works end-to-end; Gemini classification itself can be a stub returning placeholder structured data if Gemini API key isn't available yet, clearly marked as such)
+
+**Phase 2:** Real Gemini-backed PDF analysis, library/filter UI, question detail view, manual correction of AI metadata, deduplication logic.
+
+**Phase 3:** PYQ Finder, Predictor, embeddings + pgvector wiring, global search.
+
+**Phase 4:** Notes/summaries/flashcards generation, queue upgrade if needed.
+
+**Phase 5:** Quiz Mode, Viva Mode, spaced repetition.
+
+**Phase 6:** Revision PDF + exports, Stripe billing.
+
+**Phase 7:** Admin panel, analytics.
+
+**Phase 8:** Hardening pass.
+
+---
+
+Architecture locked. Starting Phase 1 implementation now.

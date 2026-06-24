@@ -3,6 +3,7 @@ import { getAuth } from "@clerk/express";
 import { db } from "@workspace/db";
 import { pdfsTable, processingJobsTable } from "@workspace/db";
 import { eq, and, count, desc } from "drizzle-orm";
+import { questionsTable } from "@workspace/db";
 import { requireAuth } from "../lib/auth";
 
 const router = Router();
@@ -17,12 +18,14 @@ router.get("/dashboard/stats", requireAuth, async (req, res) => {
       [processingRow],
       [completedRow],
       [failedRow],
+      [totalQuestionsRow],
       recentJobs,
     ] = await Promise.all([
       db.select({ count: count() }).from(pdfsTable).where(eq(pdfsTable.userId, userId)),
       db.select({ count: count() }).from(pdfsTable).where(and(eq(pdfsTable.userId, userId), eq(pdfsTable.status, "PROCESSING"))),
       db.select({ count: count() }).from(pdfsTable).where(and(eq(pdfsTable.userId, userId), eq(pdfsTable.status, "COMPLETED"))),
       db.select({ count: count() }).from(pdfsTable).where(and(eq(pdfsTable.userId, userId), eq(pdfsTable.status, "FAILED"))),
+      db.select({ count: count() }).from(questionsTable).where(eq(questionsTable.userId, userId)),
       db.select().from(processingJobsTable).where(eq(processingJobsTable.userId, userId)).orderBy(desc(processingJobsTable.createdAt)).limit(5),
     ]);
 
@@ -31,7 +34,7 @@ router.get("/dashboard/stats", requireAuth, async (req, res) => {
       processingPdfs: processingRow?.count ?? 0,
       completedPdfs: completedRow?.count ?? 0,
       failedPdfs: failedRow?.count ?? 0,
-      totalQuestions: 0,
+      totalQuestions: totalQuestionsRow?.count ?? 0,
       recentJobs: recentJobs.map((job) => ({
         id: job.id,
         pdfId: job.pdfId ?? null,

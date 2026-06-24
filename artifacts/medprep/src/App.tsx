@@ -12,6 +12,10 @@ import UploadPage from "@/pages/upload";
 import LibraryPage from "@/pages/library";
 import SettingsPage from "@/pages/settings";
 import LandingPage from "@/pages/landing";
+import QuestionsBrowserPage from "@/pages/questions-browser";
+import QuizPage from "@/pages/quiz";
+import FlashcardsPage from "@/pages/flashcards";
+import PricingPage from "@/pages/pricing";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -66,6 +70,18 @@ function AppRouter() {
       </Route>
       <Route path="/library">
         <ProtectedRoute component={LibraryPage} />
+      </Route>
+      <Route path="/questions">
+        <ProtectedRoute component={QuestionsBrowserPage} />
+      </Route>
+      <Route path="/quiz">
+        <ProtectedRoute component={QuizPage} />
+      </Route>
+      <Route path="/flashcards">
+        <ProtectedRoute component={FlashcardsPage} />
+      </Route>
+      <Route path="/pricing">
+        <ProtectedRoute component={PricingPage} />
       </Route>
       <Route path="/settings">
         <ProtectedRoute component={SettingsPage} />

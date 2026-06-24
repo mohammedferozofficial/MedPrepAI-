@@ -10,16 +10,17 @@ const router = Router();
 router.get("/questions", requireAuth, async (req, res) => {
   const auth = getAuth(req);
   const userId = auth.userId!;
-  const { pdfId, topic, limit = "50", page = "1" } = req.query as Record<string, string>;
+  const { pdfId, topic, difficulty, limit = "50", page = "1" } = req.query as Record<string, string>;
 
   try {
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 50));
+    const limitNum = Math.min(200, Math.max(1, parseInt(limit, 10) || 50));
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
     const offset = (pageNum - 1) * limitNum;
 
     const conditions = [eq(questionsTable.userId, userId)];
     if (pdfId) conditions.push(eq(questionsTable.pdfId, pdfId));
     if (topic) conditions.push(eq(questionsTable.topic, topic));
+    if (difficulty) conditions.push(eq(questionsTable.difficulty, difficulty as "EASY" | "MEDIUM" | "HARD"));
 
     const whereClause = and(...conditions);
 

@@ -7,12 +7,23 @@ import {
   BookOpen,
   Settings,
   Brain,
+  HelpCircle,
+  Layers,
+  Zap,
+  CreditCard,
 } from "lucide-react";
 
 const navItems = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/upload", label: "Upload PDF", icon: Upload },
   { href: "/library", label: "My Library", icon: BookOpen },
+  { href: "/questions", label: "Question Bank", icon: HelpCircle },
+  { href: "/quiz", label: "Quiz Mode", icon: Brain },
+  { href: "/flashcards", label: "Flashcards", icon: Layers },
+];
+
+const bottomNavItems = [
+  { href: "/pricing", label: "Upgrade to Pro", icon: Zap },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
@@ -51,6 +62,30 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               </Link>
             );
           })}
+
+          <div className="pt-3 mt-2 border-t border-sidebar-border space-y-0.5">
+            {bottomNavItems.map(({ href, label, icon: Icon }) => {
+              const active = location === href;
+              const isUpgrade = href === "/pricing";
+              return (
+                <Link
+                  key={href}
+                  href={href}
+                  className={cn(
+                    "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors",
+                    active
+                      ? "bg-primary text-white"
+                      : isUpgrade
+                      ? "text-primary hover:bg-primary/10"
+                      : "text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                  )}
+                >
+                  <Icon className="w-4 h-4 flex-shrink-0" />
+                  {label}
+                </Link>
+              );
+            })}
+          </div>
         </nav>
 
         <div className="px-4 py-4 border-t border-sidebar-border flex items-center gap-3">

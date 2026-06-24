@@ -1,6 +1,8 @@
-import { pgTable, text, integer, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, text, integer, timestamp, pgEnum } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
+
+export const membershipTierEnum = pgEnum("membership_tier", ["free", "pro"]);
 
 export const usersTable = pgTable("users", {
   id: text("id").primaryKey(),
@@ -8,6 +10,9 @@ export const usersTable = pgTable("users", {
   fullName: text("full_name"),
   avatarUrl: text("avatar_url"),
   role: text("role").notNull().default("student"),
+  membershipTier: membershipTierEnum("membership_tier").notNull().default("free"),
+  membershipExpiresAt: timestamp("membership_expires_at", { withTimezone: true }),
+  razorpayCustomerId: text("razorpay_customer_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 });

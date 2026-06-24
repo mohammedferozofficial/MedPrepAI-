@@ -1,0 +1,1 @@
+- [Clerk v6 React API](clerk-v6-react.md) — Show/SignedIn rename, proxyUrl env var, route wildcards, publishableKeyFromHost required

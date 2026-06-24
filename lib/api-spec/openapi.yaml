@@ -3,13 +3,24 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: MedPrep AI API specification
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: auth
+    description: Auth and user profile operations
+  - name: pdfs
+    description: PDF upload and management
+  - name: jobs
+    description: Processing job tracking
+  - name: dashboard
+    description: Dashboard summary statistics
+  - name: storage
+    description: Object storage upload and serving endpoints
+
 paths:
   /healthz:
     get:
@@ -24,13 +35,564 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /users/me:
+    get:
+      operationId: getMe
+      tags: [auth]
+      summary: Get current user profile
+      responses:
+        "200":
+          description: Current user profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfile"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+    patch:
+      operationId: updateMe
+      tags: [auth]
+      summary: Update current user profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserProfileUpdate"
+      responses:
+        "200":
+          description: Updated profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfile"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /dashboard/stats:
+    get:
+      operationId: getDashboardStats
+      tags: [dashboard]
+      summary: Get dashboard summary statistics
+      responses:
+        "200":
+          description: Dashboard statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardStats"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /pdfs:
+    get:
+      operationId: listPdfs
+      tags: [pdfs]
+      summary: List user's uploaded PDFs
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [UPLOADED, QUEUED, PROCESSING, COMPLETED, FAILED]
+        - name: subjectId
+          in: query
+          schema:
+            type: ["string", "null"]
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+      responses:
+        "200":
+          description: List of PDFs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PdfList"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /pdfs/{id}:
+    get:
+      operationId: getPdf
+      tags: [pdfs]
+      summary: Get a single PDF's metadata
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: PDF metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pdf"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+    delete:
+      operationId: deletePdf
+      tags: [pdfs]
+      summary: Delete a PDF and all its extracted questions
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /pdfs/{id}/status:
+    get:
+      operationId: getPdfStatus
+      tags: [pdfs]
+      summary: Poll PDF processing status and progress
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: PDF status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PdfStatusResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /pdfs/register:
+    post:
+      operationId: registerPdf
+      tags: [pdfs]
+      summary: Register an uploaded PDF and enqueue analysis job
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PdfRegistration"
+      responses:
+        "201":
+          description: PDF registered and job enqueued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pdf"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /jobs:
+    get:
+      operationId: listJobs
+      tags: [jobs]
+      summary: List user's processing jobs
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [PENDING, RUNNING, SUCCEEDED, FAILED]
+        - name: pdfId
+          in: query
+          schema:
+            type: ["string", "null"]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+      responses:
+        "200":
+          description: List of processing jobs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProcessingJob"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /jobs/{id}:
+    get:
+      operationId: getJob
+      tags: [jobs]
+      summary: Get a processing job's status and progress
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Processing job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProcessingJob"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /storage/uploads/request-url:
+    post:
+      tags: [storage]
+      operationId: requestUploadUrl
+      summary: Request a presigned URL for file upload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UploadUrlRequest"
+      responses:
+        "200":
+          description: Presigned upload URL generated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadUrlResponse"
+        "400":
+          description: Missing or invalid required fields
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "500":
+          description: Failed to generate upload URL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /storage/public-objects/{filePath}:
+    get:
+      tags: [storage]
+      operationId: getPublicObject
+      summary: Serve a public asset
+      parameters:
+        - name: filePath
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Object content
+          content:
+            "*/*":
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: File not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /storage/objects/{objectPath}:
+    get:
+      tags: [storage]
+      operationId: getStorageObject
+      summary: Serve a private object entity
+      parameters:
+        - name: objectPath
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Object content
+          content:
+            "*/*":
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Object not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
 components:
   schemas:
     HealthStatus:
       type: object
+      required: [status]
       properties:
         status:
           type: string
-      required:
-        - status
 
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    UserProfile:
+      type: object
+      required: [id, email, role, createdAt]
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+        fullName:
+          type: ["string", "null"]
+        avatarUrl:
+          type: ["string", "null"]
+        role:
+          type: string
+        collegeName:
+          type: ["string", "null"]
+        yearOfStudy:
+          type: ["integer", "null"]
+        examTarget:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+          format: date-time
+
+    UserProfileUpdate:
+      type: object
+      properties:
+        fullName:
+          type: string
+        collegeName:
+          type: string
+        yearOfStudy:
+          type: integer
+        examTarget:
+          type: string
+
+    DashboardStats:
+      type: object
+      required: [totalPdfs, processingPdfs, completedPdfs, totalQuestions, recentJobs]
+      properties:
+        totalPdfs:
+          type: integer
+        processingPdfs:
+          type: integer
+        completedPdfs:
+          type: integer
+        failedPdfs:
+          type: integer
+        totalQuestions:
+          type: integer
+        recentJobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProcessingJob"
+
+    PdfStatus:
+      type: string
+      enum: [UPLOADED, QUEUED, PROCESSING, COMPLETED, FAILED]
+
+    Pdf:
+      type: object
+      required: [id, userId, fileName, storagePath, fileSizeBytes, status, uploadedAt]
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        subjectId:
+          type: ["string", "null"]
+        fileName:
+          type: string
+        storagePath:
+          type: string
+        fileSizeBytes:
+          type: integer
+        pageCount:
+          type: ["integer", "null"]
+        status:
+          $ref: "#/components/schemas/PdfStatus"
+        errorMessage:
+          type: ["string", "null"]
+        uploadedAt:
+          type: string
+          format: date-time
+        processedAt:
+          type: ["string", "null"]
+          format: date-time
+
+    PdfList:
+      type: object
+      required: [items, total, page, limit]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Pdf"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+
+    PdfStatusResponse:
+      type: object
+      required: [id, status]
+      properties:
+        id:
+          type: string
+        status:
+          $ref: "#/components/schemas/PdfStatus"
+        progress:
+          type: ["integer", "null"]
+        errorMessage:
+          type: ["string", "null"]
+        processedAt:
+          type: ["string", "null"]
+          format: date-time
+
+    PdfRegistration:
+      type: object
+      required: [fileName, storagePath, fileSizeBytes]
+      properties:
+        fileName:
+          type: string
+        storagePath:
+          type: string
+        fileSizeBytes:
+          type: integer
+        subjectId:
+          type: string
+
+    JobStatus:
+      type: string
+      enum: [PENDING, RUNNING, SUCCEEDED, FAILED]
+
+    JobType:
+      type: string
+      enum: [PDF_ANALYSIS, NOTES_GENERATION, SUMMARY_GENERATION, FLASHCARD_GENERATION, QUIZ_GENERATION, REVISION_PDF]
+
+    ProcessingJob:
+      type: object
+      required: [id, userId, type, status, progress, createdAt]
+      properties:
+        id:
+          type: string
+        pdfId:
+          type: ["string", "null"]
+        userId:
+          type: string
+        type:
+          $ref: "#/components/schemas/JobType"
+        status:
+          $ref: "#/components/schemas/JobStatus"
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+        errorMessage:
+          type: ["string", "null"]
+        startedAt:
+          type: ["string", "null"]
+          format: date-time
+        completedAt:
+          type: ["string", "null"]
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+
+    UploadUrlRequest:
+      type: object
+      required: [name, size, contentType]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        size:
+          type: integer
+          minimum: 1
+        contentType:
+          type: string
+          minLength: 1
+
+    UploadUrlResponse:
+      type: object
+      required: [uploadURL, objectPath]
+      properties:
+        uploadURL:
+          type: string
+          format: uri
+        objectPath:
+          type: string
+        metadata:
+          $ref: "#/components/schemas/UploadUrlRequest"

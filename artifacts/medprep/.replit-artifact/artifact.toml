@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "MedPrep AI"
+version = "1.0.0"
+id = "artifacts/medprep"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 21284
+
+[services.development]
+run = "pnpm --filter @workspace/medprep run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/medprep", "run", "build" ]
+publicDir = "artifacts/medprep/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "21284"
+BASE_PATH = "/"

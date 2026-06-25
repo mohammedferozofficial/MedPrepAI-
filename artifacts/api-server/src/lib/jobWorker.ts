@@ -22,7 +22,9 @@ function parseBucketObject(storagePath: string): { bucketName: string; objectNam
       const entityId = storagePath.slice("/objects/".length);
       const dir = privateDir.endsWith("/") ? privateDir : privateDir + "/";
       const fullPath = dir + entityId;
-      const parts = fullPath.split("/");
+      // Handle path with or without leading slash
+      const normalized = fullPath.startsWith("/") ? fullPath.slice(1) : fullPath;
+      const parts = normalized.split("/");
       return { bucketName: parts[0], objectName: parts.slice(1).join("/") };
     }
   } catch {
@@ -83,9 +85,10 @@ async function processJob(jobId: string, pdfId: string, userId: string) {
     const rows = questions.map((q) => ({
       pdfId,
       userId,
+      questionType: q.questionType,
       questionText: q.questionText,
       options: q.options,
-      correctAnswer: q.correctAnswer,
+      correctAnswer: q.correctAnswer ?? null,
       explanation: q.explanation ?? null,
       topic: q.topic ?? null,
       difficulty: q.difficulty,
@@ -93,7 +96,16 @@ async function processJob(jobId: string, pdfId: string, userId: string) {
     }));
 
     await db.insert(questionsTable).values(rows);
-    jobLog.info({ count: questions.length }, "Questions inserted");
+    jobLog.info(
+      {
+        total: questions.length,
+        mcq: questions.filter((q) => q.questionType === "MCQ").length,
+        pyq: questions.filter((q) => q.questionType === "PYQ").length,
+        short: questions.filter((q) => q.questionType === "SHORT").length,
+        long: questions.filter((q) => q.questionType === "LONG").length,
+      },
+      "Questions inserted",
+    );
   }
 
   const now = new Date();

@@ -19,7 +19,6 @@ function getRazorpay() {
 
 const PLANS = {
   monthly: { amount: 29900, currency: "INR", days: 30 },
-  annual:  { amount: 249900, currency: "INR", days: 365 },
 } as const;
 
 type PlanKey = keyof typeof PLANS;

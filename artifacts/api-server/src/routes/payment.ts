@@ -12,41 +12,43 @@ function getRazorpay() {
   const keyId = process.env.RAZORPAY_KEY_ID;
   const keySecret = process.env.RAZORPAY_KEY_SECRET;
   if (!keyId || !keySecret) {
-    throw new Error("Razorpay keys not configured. Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET.");
+    throw new Error("Razorpay keys not configured.");
   }
   return new Razorpay({ key_id: keyId, key_secret: keySecret });
 }
 
 const PLANS = {
-  monthly: { amount: 29900, currency: "INR", days: 30, label: "MedPrep Pro - Monthly" },
-  annual: { amount: 249900, currency: "INR", days: 365, label: "MedPrep Pro - Annual" },
+  monthly: { amount: 29900, currency: "INR", days: 30 },
+  annual:  { amount: 249900, currency: "INR", days: 365 },
 } as const;
 
 type PlanKey = keyof typeof PLANS;
 
 router.post("/create-order", async (req, res) => {
   const { userId } = getAuth(req);
-  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+  if (!userId) { res.status(401).json({ error: "Unauthorized" }); return; }
 
   const plan = req.body.plan as PlanKey;
   if (!plan || !PLANS[plan]) {
-    return res.status(400).json({ error: "Invalid plan. Must be 'monthly' or 'annual'." });
+    res.status(400).json({ error: "Invalid plan. Must be 'monthly' or 'annual'." });
+    return;
   }
 
   const keyId = process.env.RAZORPAY_KEY_ID;
   if (!keyId || !process.env.RAZORPAY_KEY_SECRET) {
-    return res.status(503).json({ error: "Payment gateway not configured. Please contact support." });
+    res.status(503).json({ error: "Payment gateway not configured. Please contact support." });
+    return;
   }
 
   let razorpay: Razorpay;
   try {
     razorpay = getRazorpay();
   } catch (err: any) {
-    return res.status(503).json({ error: err.message });
+    res.status(503).json({ error: err.message });
+    return;
   }
 
   const planConfig = PLANS[plan];
-
   const order = await razorpay.orders.create({
     amount: planConfig.amount,
     currency: planConfig.currency,
@@ -64,7 +66,7 @@ router.post("/create-order", async (req, res) => {
 
 router.post("/verify", async (req, res) => {
   const { userId } = getAuth(req);
-  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+  if (!userId) { res.status(401).json({ error: "Unauthorized" }); return; }
 
   const { orderId, paymentId, signature, plan } = req.body as {
     orderId: string;
@@ -74,12 +76,14 @@ router.post("/verify", async (req, res) => {
   };
 
   if (!orderId || !paymentId || !signature || !plan || !PLANS[plan]) {
-    return res.status(400).json({ error: "Missing required fields" });
+    res.status(400).json({ error: "Missing required fields" });
+    return;
   }
 
   const keySecret = process.env.RAZORPAY_KEY_SECRET;
   if (!keySecret) {
-    return res.status(503).json({ error: "Payment gateway not configured" });
+    res.status(503).json({ error: "Payment gateway not configured" });
+    return;
   }
 
   const expectedSignature = crypto
@@ -88,7 +92,8 @@ router.post("/verify", async (req, res) => {
     .digest("hex");
 
   if (expectedSignature !== signature) {
-    return res.status(400).json({ error: "Invalid payment signature" });
+    res.status(400).json({ error: "Invalid payment signature" });
+    return;
   }
 
   const planConfig = PLANS[plan];
@@ -97,10 +102,7 @@ router.post("/verify", async (req, res) => {
 
   await db
     .update(usersTable)
-    .set({
-      membershipTier: "pro",
-      membershipExpiresAt: expiresAt,
-    })
+    .set({ membershipTier: "pro", membershipExpiresAt: expiresAt })
     .where(eq(usersTable.id, userId));
 
   res.json({ success: true, membershipTier: "pro", expiresAt });
@@ -108,7 +110,7 @@ router.post("/verify", async (req, res) => {
 
 router.get("/status", async (req, res) => {
   const { userId } = getAuth(req);
-  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+  if (!userId) { res.status(401).json({ error: "Unauthorized" }); return; }
 
   const [user] = await db
     .select({
@@ -119,17 +121,14 @@ router.get("/status", async (req, res) => {
     .where(eq(usersTable.id, userId))
     .limit(1);
 
-  if (!user) return res.status(404).json({ error: "User not found" });
+  if (!user) { res.status(404).json({ error: "User not found" }); return; }
 
   const now = new Date();
   const isActive =
     user.membershipTier === "pro" &&
     (!user.membershipExpiresAt || user.membershipExpiresAt > now);
 
-  res.json({
-    tier: isActive ? "pro" : "free",
-    expiresAt: user.membershipExpiresAt,
-  });
+  res.json({ tier: isActive ? "pro" : "free", expiresAt: user.membershipExpiresAt });
 });
 
 export default router;

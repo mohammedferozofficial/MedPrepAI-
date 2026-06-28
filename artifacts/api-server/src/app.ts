@@ -1,6 +1,7 @@
 import express, { type Express, type Request, type Response } from "express";
 import cors from "cors";
-import * as pinoHttp from "pino-http"; // Fixed call signature issue
+// 1. Import it as a wildcard namespace to capture the whole module object safely
+import * as pinoHttpModule from "pino-http"; 
 import { clerkMiddleware } from "@clerk/express";
 import { publishableKeyFromHost } from "@clerk/shared/keys";
 import {
@@ -13,18 +14,21 @@ import { logger } from "./lib/logger";
 
 const app: Express = express();
 
+// 2. Resolve the factory function dynamically depending on how the environment bundles it
+const pinoHttp = (pinoHttpModule.default || pinoHttpModule) as any;
+
 app.use(
-  pinoHttp.default({ // Uses the default export from the namespace to safely execute
+  pinoHttp({
     logger,
     serializers: {
-      req(req: any) { // Explicit type to prevent implicit 'any' error
+      req(req: any) {
         return {
           id: req.id,
           method: req.method,
           url: req.url?.split("?")[0],
         };
       },
-      res(res: any) { // Explicit type to prevent implicit 'any' error
+      res(res: any) {
         return {
           statusCode: res.statusCode,
         };
@@ -40,7 +44,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 app.use(
-  clerkMiddleware((req: Request) => ({ // Added Request type from express
+  clerkMiddleware((req: Request) => ({
     publishableKey: publishableKeyFromHost(
       getClerkProxyHost(req) ?? "",
       process.env.CLERK_PUBLISHABLE_KEY,
